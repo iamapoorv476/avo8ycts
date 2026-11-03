@@ -32,7 +32,8 @@ CREATE TABLE matched_series (
     startTime         TEXT    PRIMARY KEY,  
     settlementPeriod  INTEGER NOT NULL,
     segment           TEXT    NOT NULL CHECK (segment IN ('PEAK', 'OFFPEAK')),
-    forecast_mw       NUMERIC,              
+    forecast_mw       NUMERIC,
+    source_publish_time TEXT,              
     actual_mw         NUMERIC,              
     error_mw          NUMERIC GENERATED ALWAYS AS (forecast_mw - actual_mw) STORED,
                       

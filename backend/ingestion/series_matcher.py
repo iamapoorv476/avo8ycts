@@ -13,7 +13,6 @@ import sqlite3
 PEAK_PERIOD_START = 33
 PEAK_PERIOD_END = 38  
 
-
 def _segment_for(settlement_period: int) -> str:
     return "PEAK" if PEAK_PERIOD_START <= settlement_period <= PEAK_PERIOD_END else "OFFPEAK"
 
@@ -23,6 +22,7 @@ class SeriesMatcher:
         self.conn = conn
 
     def match(self, half_hourly_forecasts: dict[str, dict]) -> int:
+        
         actual_rows = self.conn.execute(
             "SELECT startTime, settlementPeriod, generation FROM fuelhh_actuals"
         ).fetchall()
@@ -41,16 +41,19 @@ class SeriesMatcher:
                 included = False
                 exclusion_reason = "NO_FORECAST_BEFORE_CUTOFF"
                 forecast_mw = None
+                source_publish_time = None
                 actual_mw = actual if actual_is_valid else None
             elif not actual_is_valid:
                 included = False
                 exclusion_reason = "MISSING_OR_INVALID_ACTUAL"
                 forecast_mw = forecast_entry["generation"]
+                source_publish_time = forecast_entry["source_publishTime"]
                 actual_mw = None
             else:
                 included = True
                 exclusion_reason = None
                 forecast_mw = forecast_entry["generation"]
+                source_publish_time = forecast_entry["source_publishTime"]
                 actual_mw = actual
 
             records.append(
@@ -59,6 +62,7 @@ class SeriesMatcher:
                     settlement_period,
                     segment,
                     forecast_mw,
+                    source_publish_time,
                     actual_mw,
                     int(included),
                     exclusion_reason,
@@ -67,11 +71,9 @@ class SeriesMatcher:
 
         self.conn.execute("DELETE FROM matched_series")
         self.conn.executemany(
-            """
-            INSERT INTO matched_series
-                (startTime, settlementPeriod, segment, forecast_mw, actual_mw, included, exclusion_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
+            "INSERT INTO matched_series "
+            "(startTime, settlementPeriod, segment, forecast_mw, source_publish_time, actual_mw, included, exclusion_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             records,
         )
         self.conn.commit()

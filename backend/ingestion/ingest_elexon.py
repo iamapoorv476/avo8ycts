@@ -11,26 +11,20 @@ data.elexon.co.uk. It will not run inside a sandboxed session whose egress
 allowlist excludes that host (see PROGRESS.md) — run it from an environment
 with normal internet access (local machine, CI, or the deploy target).
 
-QUERY PARAM NOTE (verified): FUELHH's settlementDateFrom/settlementDateTo
-and WINDFOR's from/to are both confirmed correct against real sample pulls
-(see PROGRESS.md) — FUELHH's row count matched exactly (settlement dates x
-periods x fuel types), and WINDFOR's from/to was confirmed to bound
-publishTime specifically, not startTime: a sample pull with from=2025-12-29,
-to=~2026-01-01 returned 32 distinct publishTime vintages inside that window,
-each carrying its own ~73h-forward startTime horizon that extends past the
-"to" bound — exactly the shape a publishTime-bounded query produces.
-
-WINDFOR RANGE LIMIT (discovered via a real ingestion run, see PROGRESS.md):
-a single WINDFOR /stream request spanning ~34 days (the full lookback-to-
-January window) does NOT error — it silently ignores from/to and returns
-the single current "live" forecast vintage instead, with no indication
-anything went wrong. A verified-working manual request spanned ~4 days.
-To work around this, WINDFOR is fetched in WINDFOR_CHUNK_DAYS-sized windows
-and the results are stitched together (fetch_windfor_chunked).
+QUERY PARAM NOTE (confirmed against Elexon's own Swagger docs for this exact
+endpoint, see PROGRESS.md): FUELHH's settlementDateFrom/settlementDateTo is
+correct. WINDFOR's /datasets/WINDFOR/stream params are publishDateTimeFrom
+and publishDateTimeTo, NOT from/to — an earlier version of this script used
+from/to (inferred from a response's shape rather than the documented
+contract, without ever confirming the actual request that produced it);
+those params aren't recognized by this endpoint, so they were silently
+ignored and the endpoint fell back to returning its current/live snapshot
+regardless of the requested range. Confirmed correct now by reading the
+endpoint's own Swagger parameter list directly.
 """
 
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -48,7 +42,6 @@ FUELHH_FROM = date(2026, 1, 1)
 FUELHH_TO = date(2026, 1, 31)
 WINDFOR_FROM = date(2025, 12, 29)  # lookback buffer (WINDFOR horizon is ~67h)
 WINDFOR_TO = date(2026, 1, 31)
-WINDFOR_CHUNK_DAYS = 3  # stay safely under the ~4-day span confirmed to work (see module docstring)
 
 
 def _fetch_stream(dataset: str, params: dict) -> list[dict]:
@@ -79,42 +72,13 @@ def fetch_fuelhh(from_date: date, to_date: date) -> list[dict]:
 
 
 def fetch_windfor(from_date: date, to_date: date) -> list[dict]:
-    """Fetch WINDFOR rows (all forecast vintages) for the given date range (inclusive).
-
-    Callers wanting a wide date range should use fetch_windfor_chunked instead —
-    a single request spanning too many days silently returns the wrong data
-    (see module docstring).
-    """
+    """Fetch WINDFOR rows (all forecast vintages published in this date range),
+    per the endpoint's documented publishDateTimeFrom/publishDateTimeTo params."""
     params = {
-        "from": from_date.isoformat() + "T00:00:00Z",
-        "to": to_date.isoformat() + "T23:59:59Z",
+        "publishDateTimeFrom": from_date.isoformat() + "T00:00:00Z",
+        "publishDateTimeTo": to_date.isoformat() + "T23:59:59Z",
     }
     return _fetch_stream("WINDFOR", params)
-
-
-def _date_chunks(start: date, end: date, chunk_days: int):
-    """Yield (chunk_start, chunk_end) pairs covering [start, end] inclusive, each
-    spanning at most chunk_days calendar days."""
-    current = start
-    while current <= end:
-        chunk_end = min(current + timedelta(days=chunk_days - 1), end)
-        yield current, chunk_end
-        current = chunk_end + timedelta(days=1)
-
-
-def fetch_windfor_chunked(
-    from_date: date, to_date: date, chunk_days: int = WINDFOR_CHUNK_DAYS
-) -> list[dict]:
-    """Fetch WINDFOR across a wide date range by stitching together several
-    narrower requests (see WINDFOR RANGE LIMIT in the module docstring for why
-    this is necessary rather than optional)."""
-    all_rows: list[dict] = []
-    for chunk_from, chunk_to in _date_chunks(from_date, to_date, chunk_days):
-        print(f"  WINDFOR chunk {chunk_from} to {chunk_to}...")
-        chunk_rows = fetch_windfor(chunk_from, chunk_to)
-        print(f"    -> {len(chunk_rows)} rows")
-        all_rows.extend(chunk_rows)
-    return all_rows
 
 
 def load_fuelhh_actuals(conn, rows: list[dict]) -> int:
@@ -149,11 +113,13 @@ def _sanity_check_windfor_rows(rows: list[dict]) -> None:
     """Fail loudly if the fetched WINDFOR data doesn't actually cover the
     requested historical window.
 
-    This exists specifically to catch the failure mode discovered during a
-    real ingestion run: a too-wide date range doesn't error, it silently
-    returns the single current "live" forecast vintage instead. Without this
-    check, that failure would only surface downstream as a near-empty
-    matched_series/risk-floor result with no obvious cause.
+    This exists to catch the exact failure mode found during a real
+    ingestion run: wrong/unrecognized query params don't error, they get
+    silently ignored and the endpoint falls back to its current-snapshot
+    default. Kept as a permanent guard even now that the params are
+    confirmed correct, since it's cheap insurance against this exact
+    silent-wrong-data failure mode recurring (e.g. if Elexon changes the
+    API later).
     """
     if not rows:
         raise ValueError("WINDFOR fetch returned no rows at all.")
@@ -167,8 +133,8 @@ def _sanity_check_windfor_rows(rows: list[dict]) -> None:
             f"WINDFOR fetch returned publishTime dates outside the requested "
             f"{WINDFOR_FROM} to {WINDFOR_TO} window: {sorted(out_of_range)}. "
             "This is the known failure mode where the API silently ignores "
-            "from/to for a too-wide single request and returns the current "
-            "live forecast instead — if this fires, lower WINDFOR_CHUNK_DAYS."
+            "unrecognized/wrong query params and returns its current-snapshot "
+            "default instead — double check the param names against Swagger."
         )
 
 
@@ -181,11 +147,11 @@ def run() -> None:
         wind_count = load_fuelhh_actuals(conn, fuelhh_rows)
         print(f"  -> {len(fuelhh_rows)} rows fetched, {wind_count} WIND rows loaded")
 
-        print(f"Fetching WINDFOR {WINDFOR_FROM} to {WINDFOR_TO} (chunked)...")
-        windfor_rows = fetch_windfor_chunked(WINDFOR_FROM, WINDFOR_TO)
+        print(f"Fetching WINDFOR {WINDFOR_FROM} to {WINDFOR_TO}...")
+        windfor_rows = fetch_windfor(WINDFOR_FROM, WINDFOR_TO)
         _sanity_check_windfor_rows(windfor_rows)
         forecast_count = load_windfor_forecasts(conn, windfor_rows)
-        print(f"  -> {forecast_count} forecast-vintage rows loaded total")
+        print(f"  -> {forecast_count} forecast-vintage rows loaded")
 
         conn.commit()
     finally:
