@@ -24,8 +24,8 @@ export function Header({ date, onDateChange, cutoffApplied }: HeaderProps) {
           <input
             type="date"
             value={date}
-            // min="2026-01-01"
-            // max="2026-01-31"
+            min="2026-01-01"
+            max="2026-01-31"
             onChange={(e) => onDateChange(e.target.value)}
             className="bg-transparent font-mono text-sm text-slate-100 outline-none [color-scheme:dark]"
           />

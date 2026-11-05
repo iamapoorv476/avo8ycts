@@ -1,0 +1,29 @@
+# One-command local run of the full stack: `docker compose up --build`.
+# Backend ingests real Elexon data at image build time (see
+# backend/Dockerfile) -- the first build will take a bit longer and needs
+# outbound internet access; subsequent builds are cached unless backend
+# source changes.
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Container-to-container traffic, not browser traffic: the browser
+        # only ever calls localhost:8000 directly (see below), so this stays
+        # as the backend's host-published port. Kept explicit rather than
+        # relying on Docker's internal service DNS, since the bundle is
+        # baked at build time and the browser (not the frontend container)
+        # is what actually makes the request.
+        VITE_API_BASE_URL: "http://localhost:8000"
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
