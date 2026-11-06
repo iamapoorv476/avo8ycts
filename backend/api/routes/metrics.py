@@ -17,21 +17,30 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.deps import get_db
 from api.schemas import MetricsResponse
+from ingestion.metrics_calculator import MetricsCalculator
 
 router = APIRouter()
 
 
 def _date_bounds_for_scope(scope_type: str, scope_period: str) -> tuple[str, str]:
-
+    """Turn a metrics_summary scope into concrete startTime bounds, so the
+    exclusion-breakdown query below stays scoped to the same window as the
+    metrics row it's attached to (never a global count)."""
     if scope_type == "MONTH":
         year_str, month_str = scope_period.split("-")
         year, month = int(year_str), int(month_str)
         last_day = calendar.monthrange(year, month)[1]
         return f"{scope_period}-01T00:00:00Z", f"{scope_period}-{last_day:02d}T23:59:59Z"
     elif scope_type == "RANGE":
-        from_date, to_date = scope_period.split("_")
+        parts = scope_period.split("_")
+        if len(parts) != 2:
+            raise ValueError(
+                f"scopePeriod {scope_period!r} isn't a valid RANGE -- expected "
+                "'YYYY-MM-DD_YYYY-MM-DD', e.g. '2026-01-01_2026-01-15'."
+            )
+        from_date, to_date = parts
         return f"{from_date}T00:00:00Z", f"{to_date}T23:59:59Z"
-    raise ValueError(f"Unknown scope_type: {scope_type!r}")
+    raise ValueError(f"Unknown scope_type: {scope_type!r} -- expected 'MONTH' or 'RANGE'.")
 
 
 @router.get("/metrics", response_model=MetricsResponse)
@@ -46,13 +55,27 @@ def get_metrics(
         (scopeType, scopePeriod, segment),
     ).fetchone()
 
+    if row is None and scopeType == "RANGE":
+        
+        try:
+            start_from, start_to = _date_bounds_for_scope(scopeType, scopePeriod)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        MetricsCalculator(conn).calculate(scopeType, scopePeriod, start_from, start_to)
+        row = conn.execute(
+            "SELECT * FROM metrics_summary WHERE scope_type = ? AND scope_period = ? AND segment = ?",
+            (scopeType, scopePeriod, segment),
+        ).fetchone()
+
     if row is None:
         raise HTTPException(
             status_code=404,
             detail=(
                 f"No precomputed metrics for scopeType={scopeType!r}, scopePeriod={scopePeriod!r}, "
-                f"segment={segment!r}. Metrics are precomputed at ingest time, not calculated live -- "
-                "run the ingestion pipeline for this scope first."
+                f"segment={segment!r}. MONTH scopes are precomputed at ingest time -- run the "
+                "ingestion pipeline for this scope first. (RANGE scopes are computed on first "
+                "request; a RANGE 404 here means scopePeriod couldn't be parsed as "
+                "'YYYY-MM-DD_YYYY-MM-DD', or segment isn't ALL/PEAK/OFFPEAK.)"
             ),
         )
 

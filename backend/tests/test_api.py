@@ -30,7 +30,7 @@ def seeded_db():
     # metrics_summary/decision_time_forecast so this test is independent of
     # the pipeline's own correctness (that's covered elsewhere).
     conn.execute(
-        "INSERT INTO decision_time_forecast (startTime, generation, source_publishTime) "
+        "INSERT INTO decision_time_forecast (startTime, generation, source_publish_time) "
         "VALUES ('2026-01-01T16:00:00Z', 950.0, '2025-12-31T09:00:00Z')"
     )
     conn.execute(
@@ -109,6 +109,40 @@ def test_metrics_404s_for_unknown_scope(seeded_db):
         params={"scopeType": "MONTH", "scopePeriod": "2026-02", "segment": "ALL"},
     )
     assert resp.status_code == 404
+
+
+def test_metrics_computes_and_caches_an_unseen_range_scope(seeded_db):
+    """AC 2.2 requires metrics for 'a calendar month, or an explicit date
+    range.' RANGE scopes aren't precomputed at ingest time (there's an
+    unbounded number of possible ranges), so the first request for a given
+    range computes it live from matched_series and persists it to
+    metrics_summary -- see the comment in api/routes/metrics.py. This test
+    only has the one seeded PEAK pair (2026-01-01, see seeded_db), so a
+    range covering that date should match the same precomputed MONTH values
+    (same single pair), and the write-through cache should make a second
+    request read-only."""
+    params = {"scopeType": "RANGE", "scopePeriod": "2026-01-01_2026-01-01", "segment": "ALL"}
+
+    first = client.get("/api/v1/metrics", params=params)
+    assert first.status_code == 200
+    body = first.json()
+    assert body["mbe"] == 50.0  # 950 - 900, same single included pair as the MONTH fixture
+    assert body["n"] == 1
+    assert body["excludedCount"] == 1
+
+    # Now precomputed -- confirm it reads back identically (the cache path,
+    # not a second live computation).
+    second = client.get("/api/v1/metrics", params=params)
+    assert second.status_code == 200
+    assert second.json() == body
+
+
+def test_metrics_400s_for_malformed_range_scope_period(seeded_db):
+    resp = client.get(
+        "/api/v1/metrics",
+        params={"scopeType": "RANGE", "scopePeriod": "not-a-range", "segment": "ALL"},
+    )
+    assert resp.status_code == 400
 
 
 def test_risk_floor_only_returns_periods_with_a_forecast(seeded_db):

@@ -32,7 +32,7 @@ def insert_actual(conn, start_time, settlement_period, generation):
 def test_included_pair_has_error_mw_and_correct_segment(conn):
     insert_actual(conn, "2026-01-15T16:00:00Z", 33, 950.0)  # SP 33 -> PEAK
     matcher = SeriesMatcher(conn)
-    n = matcher.match({"2026-01-15T16:00:00Z": {"generation": 1000.0, "source_publishTime": "x"}})
+    n = matcher.match({"2026-01-15T16:00:00Z": {"generation": 1000.0, "source_publish_time": "x"}})
 
     assert n == 1
     row = conn.execute("SELECT * FROM matched_series").fetchone()
@@ -47,7 +47,7 @@ def test_included_pair_has_error_mw_and_correct_segment(conn):
 def test_offpeak_segment_outside_peak_window(conn):
     insert_actual(conn, "2026-01-15T00:00:00Z", 1, 500.0)  # SP 1 -> OFFPEAK
     matcher = SeriesMatcher(conn)
-    matcher.match({"2026-01-15T00:00:00Z": {"generation": 520.0, "source_publishTime": "x"}})
+    matcher.match({"2026-01-15T00:00:00Z": {"generation": 520.0, "source_publish_time": "x"}})
 
     row = conn.execute("SELECT segment FROM matched_series").fetchone()
     assert row["segment"] == "OFFPEAK"
@@ -68,7 +68,7 @@ def test_missing_forecast_is_excluded_not_dropped(conn):
 def test_negative_actual_is_invalid_and_excluded(conn):
     insert_actual(conn, "2026-01-15T00:00:00Z", 1, -5.0)  # wind generation can't be negative
     matcher = SeriesMatcher(conn)
-    matcher.match({"2026-01-15T00:00:00Z": {"generation": 520.0, "source_publishTime": "x"}})
+    matcher.match({"2026-01-15T00:00:00Z": {"generation": 520.0, "source_publish_time": "x"}})
 
     row = conn.execute("SELECT * FROM matched_series").fetchone()
     assert row["included"] == 0
@@ -83,7 +83,7 @@ def test_peak_window_boundaries_inclusive(conn):
     insert_actual(conn, "2026-01-15T19:00:00Z", 39, 100.0)  # just after peak
     matcher = SeriesMatcher(conn)
     matcher.match(
-        {ts: {"generation": 100.0, "source_publishTime": "x"} for ts in [
+        {ts: {"generation": 100.0, "source_publish_time": "x"} for ts in [
             "2026-01-15T16:00:00Z", "2026-01-15T18:30:00Z", "2026-01-15T15:30:00Z", "2026-01-15T19:00:00Z",
         ]}
     )

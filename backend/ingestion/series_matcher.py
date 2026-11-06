@@ -4,6 +4,22 @@ Single responsibility: join FUELHH actuals against the step-held
 decision-time forecast, assign a PEAK/OFF-PEAK segment, and flag any
 exclusion with an explicit reason. Writes matched_series.
 
+Join + exclusion flagging are deliberately combined in one class (not split
+further): both operations happen in the same single pass over the actuals,
+and splitting them would mean passing the same per-row decision between two
+objects for no isolation benefit — not justified for this scope (YAGNI).
+
+Base population: this class iterates over fuelhh_actuals rows (not a
+synthetic full 1,488-slot calendar grid), on the assumption that raw
+ingestion is complete for January 2026 — i.e. that FUELHH genuinely returns
+a row for every settlement period in scope. If that assumption is ever
+wrong (an ingestion gap), an entire settlement period would be missing from
+matched_series with no exclusion row logged for it — different from, and
+not caught by, the MISSING_OR_INVALID_ACTUAL case below (which requires the
+row to exist with a null/invalid value). This is a known limitation, not a
+silent-drop violation of AC 2.1: AC 2.1's "explicitly logged, not silently
+dropped" requirement is about pairs this class decides to exclude, not about
+upstream ingestion completeness, which is a separate concern.
 """
 
 from __future__ import annotations
@@ -12,6 +28,7 @@ import sqlite3
 
 PEAK_PERIOD_START = 33
 PEAK_PERIOD_END = 38  
+
 
 def _segment_for(settlement_period: int) -> str:
     return "PEAK" if PEAK_PERIOD_START <= settlement_period <= PEAK_PERIOD_END else "OFFPEAK"
@@ -22,7 +39,17 @@ class SeriesMatcher:
         self.conn = conn
 
     def match(self, half_hourly_forecasts: dict[str, dict]) -> int:
-        
+        """Join every FUELHH actual against its half-hourly decision-time forecast.
+
+        `half_hourly_forecasts` is the dict produced by
+        DecisionTimeForecastBuilder.step_hold_half_hourly(), keyed by startTime.
+        A startTime absent from it means AC 1.5's NO_FORECAST_BEFORE_CUTOFF.
+
+        An actual that is NULL or negative (wind generation cannot be negative)
+        is MISSING_OR_INVALID_ACTUAL, regardless of whether a forecast exists.
+
+        Returns the number of rows written to matched_series.
+        """
         actual_rows = self.conn.execute(
             "SELECT startTime, settlementPeriod, generation FROM fuelhh_actuals"
         ).fetchall()
@@ -47,13 +74,13 @@ class SeriesMatcher:
                 included = False
                 exclusion_reason = "MISSING_OR_INVALID_ACTUAL"
                 forecast_mw = forecast_entry["generation"]
-                source_publish_time = forecast_entry["source_publishTime"]
+                source_publish_time = forecast_entry["source_publish_time"]
                 actual_mw = None
             else:
                 included = True
                 exclusion_reason = None
                 forecast_mw = forecast_entry["generation"]
-                source_publish_time = forecast_entry["source_publishTime"]
+                source_publish_time = forecast_entry["source_publish_time"]
                 actual_mw = actual
 
             records.append(
