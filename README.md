@@ -117,9 +117,7 @@ cd backend
 pytest -v
 ```
 
-One thing to keep in mind when running the tests: the test suite and the real ingestion pipeline use the same SQLite file. Running `pytest` after a real ingestion run removes that database during fixture cleanup. The API will then fail because the new database file has no schema.
-
-This is a documented tradeoff for the project's scope. The safe workflow is to run ingestion first, then start the API or demo. If you run the tests in between, run ingestion again before serving the application. More details are in `docs/design-decisions.md`.
+The test suite runs against its own disposable database file, not the real one — each test redirects the database path to a temporary file before seeding, so running `pytest` never touches or wipes the data from a real ingestion run. No ordering to worry about between testing and serving. More details are in `docs/design-decisions.md`.
 
 ## Deployment
 

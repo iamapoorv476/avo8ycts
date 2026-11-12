@@ -1,9 +1,12 @@
 """Tests for the three read-only API endpoints.
 
-Like test_run_ingestion_pipeline.py, this seeds the real file-backed DB
-(api/deps.get_db always opens db.connection.get_connection(), the project's
-single DB file -- no connection injection, deliberately simple for this
-project's scope) and cleans it up afterward.
+Like test_run_ingestion_pipeline.py, this seeds a DB via db.connection
+(api/deps.get_db always opens db.connection.get_connection() -- no
+connection injection, deliberately simple for this project's scope). The
+seeded_db fixture below redirects db.connection.DB_PATH to a pytest
+tmp_path file before seeding, so this suite never touches or deletes the
+real backend/db/wind_forecast.db, and there's no manual file cleanup --
+tmp_path is pytest's own disposable per-test directory.
 """
 
 import sys
@@ -13,22 +16,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from db.connection import DB_PATH, get_connection, init_schema  # noqa: E402
-from api.main import app  # noqa: E402
+import db.connection as db_connection  
+from db.connection import get_connection, init_schema  
+from api.main import app  
 
 client = TestClient(app)
 
 
 @pytest.fixture
-def seeded_db():
+def seeded_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_connection, "DB_PATH", tmp_path / "test.db")
     init_schema()
     conn = get_connection()
 
-    # One clean PEAK pair (included), one OFFPEAK pair excluded for
-    # NO_FORECAST_BEFORE_CUTOFF -- mirrors test_run_ingestion_pipeline's
-    # fixture shape, but inserted directly into matched_series/
-    # metrics_summary/decision_time_forecast so this test is independent of
-    # the pipeline's own correctness (that's covered elsewhere).
     conn.execute(
         "INSERT INTO decision_time_forecast (startTime, generation, source_publish_time) "
         "VALUES ('2026-01-01T16:00:00Z', 950.0, '2025-12-31T09:00:00Z')"
@@ -60,9 +60,6 @@ def seeded_db():
 
     yield
 
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-
 
 def test_forecast_detail_returns_both_periods_with_correct_status(seeded_db):
     resp = client.get("/api/v1/forecast-detail", params={"date": "2026-01-01"})
@@ -70,7 +67,7 @@ def test_forecast_detail_returns_both_periods_with_correct_status(seeded_db):
     body = resp.json()
 
     assert body["date"] == "2026-01-01"
-    assert body["cutoffApplied"] == "2025-12-31T11:00:00Z"  # day before, 11:00 UTC
+    assert body["cutoffApplied"] == "2025-12-31T11:00:00Z"  
 
     periods = {p["settlementPeriod"]: p for p in body["periods"]}
     assert periods[33]["status"] == "OK"
@@ -126,12 +123,10 @@ def test_metrics_computes_and_caches_an_unseen_range_scope(seeded_db):
     first = client.get("/api/v1/metrics", params=params)
     assert first.status_code == 200
     body = first.json()
-    assert body["mbe"] == 50.0  # 950 - 900, same single included pair as the MONTH fixture
+    assert body["mbe"] == 50.0  
     assert body["n"] == 1
     assert body["excludedCount"] == 1
 
-    # Now precomputed -- confirm it reads back identically (the cache path,
-    # not a second live computation).
     second = client.get("/api/v1/metrics", params=params)
     assert second.status_code == 200
     assert second.json() == body
@@ -150,7 +145,7 @@ def test_risk_floor_only_returns_periods_with_a_forecast(seeded_db):
     assert resp.status_code == 200
     body = resp.json()
 
-    # Only the PEAK period has a floor; OFFPEAK (no forecast) is excluded.
+    
     assert len(body["periods"]) == 1
     assert body["periods"][0]["settlementPeriod"] == 33
     assert body["periods"][0]["floorMw"] == 700.0
